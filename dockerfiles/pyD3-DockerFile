@@ -1,0 +1,14 @@
+FROM python:3.9
+
+WORKDIR /app
+
+# Install dependencies
+RUN apt-get update && apt-get install -y libffi-dev libssl-dev && \
+    pip install --no-cache-dir dissect.es dissect.cstruct elasticsearch requests
+
+# Copy script and config
+COPY analyze_disks.py /app/analyze_disks.py
+COPY .env /app/.env
+
+CMD ["python", "/app/analyze_disks.py"]
+

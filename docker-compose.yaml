@@ -1,0 +1,28 @@
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.6.2
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - ELASTIC_USERNAME=${ELASTICSEARCH_USERNAME}
+      - ELASTIC_PASSWORD=${ELASTICSEARCH_PASSWORD}
+      - xpack.security.enabled=false
+    ports:
+      - "9200:9200"
+    volumes:
+      - elastic_data:/usr/share/elasticsearch/data
+
+  dissect_analyzer:
+    build: ./dockerfiles/pyD3-Dockerfile
+    container_name: dissect_analyzer
+    depends_on:
+      - elasticsearch
+    volumes:
+      - ${LOCAL_MEMORY_IMAGES_PATH}:${MEMORY_IMAGES_PATH}
+      - ${LOCAL_DISK_IMAGES_PATH}:${DISK_IMAGES_PATH}
+    env_file:
+      - .env
+
+volumes:
+  elastic_data:
+    driver: local
