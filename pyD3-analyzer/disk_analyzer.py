@@ -1,8 +1,13 @@
-import os
+import argparse
 import logging
+import sys
 from datetime import datetime
+
 from dissect.target import Target
-from dissect.storage import files
+from dissect.target.exceptions import FatalError, PluginNotFoundError, TargetError, UnsupportedPluginError
+from dissect.target.plugin import find_plugin_functions
+from dissect.target.report import ExecutionReport
+from dissect.target.tools.utils import process_generic_arguments, find_and_filter_plugins, execute_function_on_target
 
 # Configure logging
 logging.basicConfig(
@@ -11,114 +16,81 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 
+log = logging.getLogger(__name__)
+logging.raiseExceptions = False
+
+
 class DiskAnalyzer:
-    def __init__(self, disk_path):
-        """Initialize the analyzer with a disk image path."""
-        self.disk_path = disk_path
-        self.target = None
+    def __init__(self, target_paths):
+        """Initialize the analyzer with a list of disk image paths."""
+        self.targets = Target.open_all(target_paths)
+        self.execution_report = ExecutionReport()
+        self.analysis_results = []
 
-    def load_disk(self):
-        """Loads the disk image and initializes the Target object."""
+    def analyze_basic_info(self, target):
+        """Extracts basic system information like hostname, OS, and users."""
         try:
-            self.target = Target.open(self.disk_path)
-            logging.info(f"[*] Successfully loaded disk image: {self.disk_path}")
+            info = {
+                "disk_path": target.path,
+                "hostname": target.hostname,
+                "os_version": target.version,
+                "os_type": target.os,
+                "os_architecture": getattr(target, "architecture", "Unknown"),  # ✅ FIXED
+                "users": list(target.users())
+            }
+            log.info(f"[+] Extracted basic info: {info}")
+            return info
         except Exception as e:
-            logging.error(f"[-] Failed to load disk image: {e}")
-            return False
-        return True
+            log.error(f"[-] Failed to extract basic info: {e}")
+            return {}
 
-    def get_basic_info(self):
-        """Extracts basic system information from the target."""
-        if not self.target:
-            return None
-
-        info = {
-            "disk_path": self.disk_path,
-            "analysis_time": datetime.utcnow().isoformat(),
-            "hostname": self.target.hostname,
-            "os_version": self.target.version,
-            "os_type": self.target.os,
-            "os_architecture": self.target.arch,
-            "users": list(self.target.users())
-        }
-        logging.info(f"[+] Extracted basic info: {info}")
-        return info
-
-    def list_partitions(self):
+    def analyze_partitions(self, target):
         """Lists all partitions and their file system types."""
-        if not self.target:
-            return None
-
-        partitions = []
-        for vol in self.target.volumes():
-            partitions.append({
-                "offset": vol.offset,
-                "size": vol.size,
-                "type": vol.type,
-                "filesystem": vol.fs.__class__.__name__ if vol.fs else "Unknown"
-            })
-        
-        logging.info(f"[+] Found {len(partitions)} partitions.")
-        return partitions
-
-    def analyze_filesystem(self, partition_id=0):
-        """Extracts key filesystem details (MFT, registry, logs) from a given partition."""
-        if not self.target:
-            return None
-        
         try:
-            vol = self.target.volumes()[partition_id]
-            fs = vol.fs
+            partitions = []
+            for vol in target.volumes:  # ✅ FIXED
+                partitions.append({
+                    "offset": vol.offset,
+                    "size": vol.size,
+                    "type": vol.type,
+                    "filesystem": vol.fs.__class__.__name__ if vol.fs else "Unknown"
+                })
+            log.info(f"[+] Found {len(partitions)} partitions.")
+            return partitions
+        except Exception as e:
+            log.error(f"[-] Failed to extract partitions: {e}")
+            return []
 
-            fs_info = {
-                "filesystem": fs.__class__.__name__,
-                "volume_serial": getattr(fs, 'volume_serial', "Unknown"),
-                "file_count": sum(1 for _ in fs.entries())
+    def analyze_plugins(self, target, function_filter="*"):
+        """Executes all matching Dissect plugins on the target."""
+        try:
+            results = {}
+            functions, _ = find_plugin_functions(target, function_filter, compatibility=False)
+            for func_def in find_and_filter_plugins(target, function_filter):
+                try:
+                    output_type, result, _ = execute_function_on_target(target, func_def, [])
+                    if output_type == "record":
+                        results[func_def.name] = result
+                except (UnsupportedPluginError, PluginNotFoundError) as e:  # ✅ FIXED
+                    log.warning(f"[-] Skipping {func_def.name}: {e}")
+            return results
+        except Exception as e:
+            log.error(f"[-] Failed to execute plugins: {e}")
+            return {}
+
+    def run_analysis(self):
+        """Runs the full forensic analysis on all loaded disk images."""
+        for target in self.targets:
+            log.info(f"[*] Analyzing target: {target.path}")
+
+            report = {
+                "basic_info": self.analyze_basic_info(target),
+                "partitions": self.analyze_partitions(target)
+                #"plugins": self.analyze_plugins(target, "*"),
             }
 
-            logging.info(f"[+] Filesystem analysis completed: {fs_info}")
-            return fs_info
-        except Exception as e:
-            logging.error(f"[-] Filesystem analysis failed: {e}")
-            return None
+            self.analysis_results.append(report)
 
-    def extract_artifacts(self):
-        """Extracts key forensic artifacts like registry hives and log files."""
-        if not self.target:
-            return None
+        return self.analysis_results
 
-        artifacts = {}
-
-        # Extract Windows Registry Hives
-        try:
-            registry_hives = self.target.registry_hives()
-            artifacts["registry_hives"] = list(registry_hives.keys())
-            logging.info(f"[+] Extracted registry hives: {artifacts['registry_hives']}")
-        except Exception as e:
-            logging.warning(f"[-] Failed to extract registry hives: {e}")
-
-        # Extract Log Files
-        try:
-            log_files = self.target.logs()
-            artifacts["log_files"] = list(log_files.keys())
-            logging.info(f"[+] Extracted log files: {artifacts['log_files']}")
-        except Exception as e:
-            logging.warning(f"[-] Failed to extract log files: {e}")
-
-        return artifacts
-
-    def analyze_disk(self):
-        """Performs a full disk analysis and returns a comprehensive report."""
-        if not self.load_disk():
-            return None
-
-        report = {
-            "basic_info": self.get_basic_info(),
-            "partitions": self.list_partitions(),
-            "filesystem_info": self.analyze_filesystem(),
-            "artifacts": self.extract_artifacts()
-        }
-
-        logging.info(f"[+] Full disk analysis completed for {self.disk_path}")
-        return report
 
